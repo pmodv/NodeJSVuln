@@ -1,0 +1,13 @@
+{
+  "name": "vuln-demo",
+  "version": "1.0.0",
+  "description": "Deliberately vulnerable Node.js server for SAST/SCA scanner validation",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "minimist": "1.2.0"
+  }
+}
