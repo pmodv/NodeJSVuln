@@ -9,6 +9,6 @@
   "dependencies": {
     "express": "^4.19.2",
     "minimist": "1.2.0",
-    "mysql12": "^3.9.0"
+    "mysql2": "^3.9.0"
   }
 }
