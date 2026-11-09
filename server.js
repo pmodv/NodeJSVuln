@@ -31,6 +31,27 @@ app.get('/ping', (req, res) => {
   });
 });
 
+// --- CRITICAL SAST: Code Injection via vm (CWE-94) ---
+// req.query.code -> vm.runInNewContext. Unauthenticated RCE.
+// e.g. /run?code=process.mainModule.require('child_process').execSync('id').toString()
+app.get('/run', (req, res) => {
+  const vm = require('vm');                 // Node core module — no dependency added
+  const code = req.query.code || '1+1';
+  const result = vm.runInNewContext(code);  // tainted data into vm code-exec sink
+  res.type('text/plain').send(String(result));
+});
+
+// --- CRITICAL SAST: OS Command Injection (CWE-78) ---
+// req.query.domain -> child_process.exec. Unauthenticated RCE.
+// e.g. /lookup?domain=example.com;id
+app.get('/lookup', (req, res) => {
+  const domain = req.query.domain || 'example.com';
+  exec('nslookup ' + domain, (err, stdout, stderr) => {  // tainted data into exec sink
+    res.type('text/plain').send(stdout || stderr || String(err));
+  });
+});
+
+
 app.get('/user', (req, res) => {
   // --- CRITICAL SAST: SQL injection (CWE-89) ---
   // Express query param (taint source) concatenated into the SQL string
