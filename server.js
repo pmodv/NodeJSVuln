@@ -51,6 +51,30 @@ app.get('/lookup', (req, res) => {
   });
 });
 
+// --- CWE-94: Code Injection ----------------------------------- [CRITICAL] ---
+// req.query.expr -> eval. Unauthenticated RCE.
+// e.g. /calc?expr=require('child_process').execSync('id').toString()
+app.get('/calc', (req, res) => {
+  const expr = req.query.expr || '1+1';
+  const result = eval(expr);                 // tainted data into eval()
+  res.type('text/plain').send(String(result));
+});
+
+
+// --- CWE-601: Open Redirect --------------------------------------------------
+// req.query.next -> res.redirect. e.g. /go?next=https://evil.example
+app.get('/go', (req, res) => {
+  res.redirect(req.query.next || '/');
+});
+
+// --- CWE-327/328: Weak Hashing Algorithm -------------------------------------
+// MD5 used for a "password" hash.
+app.get('/hash', (req, res) => {
+  const pw = req.query.pw || 'password';
+  const digest = crypto.createHash('md5').update(pw).digest('hex');
+  res.type('text/plain').send(digest);
+});
+
 
 app.get('/user', (req, res) => {
   // --- CRITICAL SAST: SQL injection (CWE-89) ---
