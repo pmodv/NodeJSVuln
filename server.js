@@ -40,6 +40,46 @@ app.get('/ping', (req, res) => {
   });
 });
 
+// --- CRITICAL SAST: Code Injection via Function constructor (CWE-94) ---
+// req.query.body -> new Function(). Unauthenticated RCE.
+// e.g. /fn?body=return process.mainModule.require('child_process').execSync('id').toString()
+app.get('/fn', (req, res) => {
+  const body = req.query.body || 'return 1+1';
+  const fn = new Function(body);                 // tainted data compiled into a function
+  res.type('text/plain').send(String(fn()));
+});
+
+// --- CRITICAL SAST: OS Command Injection via execSync (CWE-78) ---
+// req.query.path -> child_process.execSync. Unauthenticated RCE.
+// e.g. /ls?path=.;id
+app.get('/ls', (req, res) => {
+  const { execSync } = require('child_process'); // core module — no dependency added
+  const dir = req.query.path || '.';
+  const out = execSync('ls ' + dir);             // tainted data into execSync sink
+  res.type('text/plain').send(out.toString());
+});
+
+// --- CRITICAL SAST: Code Injection via vm (CWE-94) ---
+// req.query.code -> vm.runInNewContext. Unauthenticated RCE.
+// e.g. /run?code=process.mainModule.require('child_process').execSync('id').toString()
+app.get('/run', (req, res) => {
+  const vm = require('vm');                 // Node core module — no dependency added
+  const code = req.query.code || '1+1';
+  const result = vm.runInNewContext(code);  // tainted data into vm code-exec sink
+  res.type('text/plain').send(String(result));
+});
+
+// --- CRITICAL SAST: OS Command Injection (CWE-78) ---
+// req.query.domain -> child_process.exec. Unauthenticated RCE.
+// e.g. /lookup?domain=example.com;id
+app.get('/lookup', (req, res) => {
+  const domain = req.query.domain || 'example.com';
+  exec('nslookup ' + domain, (err, stdout, stderr) => {  // tainted data into exec sink
+    res.type('text/plain').send(stdout || stderr || String(err));
+  });
+});
+
+
 // --- CWE-94: Code Injection ----------------------------------- [CRITICAL] ---
 // req.query.expr -> eval. Unauthenticated RCE.
 // e.g. /calc?expr=require('child_process').execSync('id').toString()
@@ -49,9 +89,22 @@ app.get('/calc', (req, res) => {
   res.type('text/plain').send(String(result));
 });
 
-// --- CWE-89: SQL Injection ---------------------------------------------------
-// req.query.name -> mysql2 .query() via string concat.
-// e.g. /user?name=alice' OR '1'='1
+
+// --- CWE-601: Open Redirect --------------------------------------------------
+// req.query.next -> res.redirect. e.g. /go?next=https://evil.example
+app.get('/go', (req, res) => {
+  res.redirect(req.query.next || '/');
+});
+
+// --- CWE-327/328: Weak Hashing Algorithm -------------------------------------
+// MD5 used for a "password" hash.
+app.get('/hash', (req, res) => {
+  const pw = req.query.pw || 'password';
+  const digest = crypto.createHash('md5').update(pw).digest('hex');
+  res.type('text/plain').send(digest);
+});
+
+
 app.get('/user', (req, res) => {
   const name = req.query.name || '';
   const sql = "SELECT id, username, email FROM users WHERE username = '" + name + "'";
