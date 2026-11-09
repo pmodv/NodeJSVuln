@@ -40,6 +40,25 @@ app.get('/ping', (req, res) => {
   });
 });
 
+// --- CRITICAL SAST: Code Injection via Function constructor (CWE-94) ---
+// req.query.body -> new Function(). Unauthenticated RCE.
+// e.g. /fn?body=return process.mainModule.require('child_process').execSync('id').toString()
+app.get('/fn', (req, res) => {
+  const body = req.query.body || 'return 1+1';
+  const fn = new Function(body);                 // tainted data compiled into a function
+  res.type('text/plain').send(String(fn()));
+});
+
+// --- CRITICAL SAST: OS Command Injection via execSync (CWE-78) ---
+// req.query.path -> child_process.execSync. Unauthenticated RCE.
+// e.g. /ls?path=.;id
+app.get('/ls', (req, res) => {
+  const { execSync } = require('child_process'); // core module — no dependency added
+  const dir = req.query.path || '.';
+  const out = execSync('ls ' + dir);             // tainted data into execSync sink
+  res.type('text/plain').send(out.toString());
+});
+
 // --- CRITICAL SAST: Code Injection via vm (CWE-94) ---
 // req.query.code -> vm.runInNewContext. Unauthenticated RCE.
 // e.g. /run?code=process.mainModule.require('child_process').execSync('id').toString()
@@ -59,6 +78,7 @@ app.get('/lookup', (req, res) => {
     res.type('text/plain').send(stdout || stderr || String(err));
   });
 });
+
 
 // --- CWE-94: Code Injection ----------------------------------- [CRITICAL] ---
 // req.query.expr -> eval. Unauthenticated RCE.
