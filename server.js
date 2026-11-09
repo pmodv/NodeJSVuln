@@ -1,53 +1,124 @@
-// Deliberately vulnerable demo server for SAST/SCA scanner validation.
-// Written against Coverity-recognized source/sink pairs (Express req.query
-// as taint source; child_process.exec and mysql2 .query() as sinks).
-// DO NOT deploy. Needs no live DB to trip static analysis.
+// =============================================================================
+// Deliberately vulnerable demo server — labeled one-finding-per-CWE fixture.
+// Purpose: validate Black Duck (SCA) + Coverity (SAST) detection & policy.
+// DO NOT DEPLOY. No live DB/network required to trip static taint analysis.
+//
+// Each route below is a single, clean source->sink pair in the dialect
+// Coverity models (Express req.query as taint source; built-in / mysql2 sinks).
+// The two RCE sinks are marked [CRITICAL] — highest impact, policy-rated top.
+// Finding <-> route <-> CWE map is in README.md.
+// =============================================================================
 
 const express = require('express');
 const { exec } = require('child_process');
+const fs = require('fs');
+const http = require('http');
+const crypto = require('crypto');
 const mysql = require('mysql2');
 
-// SCA note: minimist@1.2.0 carries CVE-2020-7598 and CVE-2021-44906
-// (prototype pollution). Present so Black Duck SCA has something to flag.
+// SCA: minimist@1.2.0 -> CVE-2020-7598 + CVE-2021-44906 (prototype pollution).
 const parseArgs = require('minimist');
 
 const app = express();
 
-// Connection is never required to be live for static taint analysis.
+// --- CWE-798: Hard-coded Credentials -----------------------------------------
+// Literal DB creds. Connection need not be live for static analysis.
 const db = mysql.createConnection({
   host: 'localhost',
   user: 'root',
-  password: 'root',
+  password: 'SuperSecret123',   // hard-coded secret
   database: 'app',
 });
 
+// --- CWE-78: OS Command Injection ----------------------------- [CRITICAL] ---
+// req.query.host -> child_process.exec. Unauthenticated RCE.
+// e.g. /ping?host=localhost;id
 app.get('/ping', (req, res) => {
-  // --- CRITICAL SAST: OS command injection (CWE-78) ---
-  // Express query param (taint source) concatenated into a shell command.
-  // e.g. /ping?host=localhost;id  -> runs `id`
   const host = req.query.host || 'localhost';
   exec('ping -c 1 ' + host, (err, stdout, stderr) => {
     res.type('text/plain').send(stdout || stderr || String(err));
   });
 });
 
+// --- CWE-94: Code Injection ----------------------------------- [CRITICAL] ---
+// req.query.expr -> eval. Unauthenticated RCE.
+// e.g. /calc?expr=require('child_process').execSync('id').toString()
+app.get('/calc', (req, res) => {
+  const expr = req.query.expr || '1+1';
+  const result = eval(expr);                 // tainted data into eval()
+  res.type('text/plain').send(String(result));
+});
+
+// --- CWE-89: SQL Injection ---------------------------------------------------
+// req.query.name -> mysql2 .query() via string concat.
+// e.g. /user?name=alice' OR '1'='1
 app.get('/user', (req, res) => {
-  // --- CRITICAL SAST: SQL injection (CWE-89) ---
-  // Express query param (taint source) concatenated into the SQL string
-  // passed to mysql2 .query() (recognized SQLI sink).
-  // e.g. /user?name=alice' OR '1'='1  -> returns every row
   const name = req.query.name || '';
   const sql = "SELECT id, username, email FROM users WHERE username = '" + name + "'";
   db.query(sql, (err, rows) => {
-    if (err) return res.status(400).type('text/plain').send('query error: ' + err.message);
-    res.json(rows);
+    res.json(err ? { error: err.message } : rows);
   });
 });
 
+// --- CWE-22: Path Traversal --------------------------------------------------
+// req.query.file -> fs.readFile. e.g. /read?file=../../etc/passwd
+app.get('/read', (req, res) => {
+  const file = req.query.file || 'README.md';
+  fs.readFile(file, 'utf8', (err, data) => {
+    res.type('text/plain').send(err ? err.message : data);
+  });
+});
+
+// --- CWE-918: Server-Side Request Forgery ------------------------------------
+// req.query.url -> http.get. e.g. /fetch?url=http://169.254.169.254/
+app.get('/fetch', (req, res) => {
+  const target = req.query.url || 'http://localhost/';
+  http.get(target, (r) => {
+    let body = '';
+    r.on('data', (c) => (body += c));
+    r.on('end', () => res.type('text/plain').send(body));
+  }).on('error', (e) => res.type('text/plain').send(e.message));
+});
+
+// --- CWE-79: Reflected Cross-Site Scripting ----------------------------------
+// req.query.name -> res.send() with HTML. e.g. /greet?name=<script>alert(1)</script>
+app.get('/greet', (req, res) => {
+  const name = req.query.name || 'world';
+  res.type('text/html').send('<h1>Hello ' + name + '</h1>');
+});
+
+// --- CWE-601: Open Redirect --------------------------------------------------
+// req.query.next -> res.redirect. e.g. /go?next=https://evil.example
+app.get('/go', (req, res) => {
+  res.redirect(req.query.next || '/');
+});
+
+// --- CWE-327/328: Weak Hashing Algorithm -------------------------------------
+// MD5 used for a "password" hash.
+app.get('/hash', (req, res) => {
+  const pw = req.query.pw || 'password';
+  const digest = crypto.createHash('md5').update(pw).digest('hex');
+  res.type('text/plain').send(digest);
+});
+
+// --- CWE-338: Insecure Randomness --------------------------------------------
+// Math.random() used to mint a session token.
+app.get('/token', (req, res) => {
+  const token = Math.random().toString(36).slice(2);
+  res.type('text/plain').send(token);
+});
+
 app.get('/', (req, res) => {
-  res.type('text/plain').send('vuln-demo: try GET /ping?host=localhost  or  GET /user?name=alice\n');
+  res.type('text/plain').send(
+    'vuln-demo fixture. Routes: /ping /calc /user /read /fetch /greet /go /hash /token\n'
+  );
 });
 
 const argv = parseArgs(process.argv.slice(2));
 const port = argv.port || 3000;
-app.listen(port, () => console.log(`vuln-demo listening on http://localhost:${port}`));
+
+// --- CWE-319: Cleartext Transmission -----------------------------------------
+// Plain HTTP listener (no TLS).
+http.createServer(app).listen(port, () => {
+  console.log('vuln-demo listening on http://localhost:' + port);
+});
