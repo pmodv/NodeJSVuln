@@ -1,64 +1,53 @@
-// Deliberately vulnerable demo server.
-// Purpose: give a SAST tool and an SCA tool critical findings to catch.
-// DO NOT deploy. Run only on an isolated machine.
+// Deliberately vulnerable demo server for SAST/SCA scanner validation.
+// Written against Coverity-recognized source/sink pairs (Express req.query
+// as taint source; child_process.exec and mysql2 .query() as sinks).
+// DO NOT deploy. Needs no live DB to trip static analysis.
 
-const http = require('http');
-const { URL } = require('url');
+const express = require('express');
 const { exec } = require('child_process');
-const Database = require('better-sqlite3');
+const mysql = require('mysql2');
 
-// SCA note: this pulls in minimist@1.2.0 (CVE-2021-44906, prototype
-// pollution, CVSS 9.8 critical). Present so an SCA scan has something to flag.
+// SCA note: minimist@1.2.0 carries CVE-2020-7598 and CVE-2021-44906
+// (prototype pollution). Present so Black Duck SCA has something to flag.
 const parseArgs = require('minimist');
 
-// Seed a throwaway in-memory DB so the SQLi route actually runs.
-const db = new Database(':memory:');
-db.exec(`
-  CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, email TEXT);
-  INSERT INTO users (username, email) VALUES
-    ('alice', 'alice@example.com'),
-    ('bob',   'bob@example.com');
-`);
+const app = express();
 
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+// Connection is never required to be live for static taint analysis.
+const db = mysql.createConnection({
+  host: 'localhost',
+  user: 'root',
+  password: 'root',
+  database: 'app',
+});
 
-  if (url.pathname === '/ping') {
-    // --- CRITICAL SAST FINDING #1: OS command injection (CWE-78) ---
-    // Untrusted query param concatenated straight into a shell command.
-    // e.g. /ping?host=localhost;id   ->   runs `id`
-    const host = url.searchParams.get('host') || 'localhost';
-    exec('ping -c 1 ' + host, (err, stdout, stderr) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end(stdout || stderr || String(err));
-    });
-    return;
-  }
+app.get('/ping', (req, res) => {
+  // --- CRITICAL SAST: OS command injection (CWE-78) ---
+  // Express query param (taint source) concatenated into a shell command.
+  // e.g. /ping?host=localhost;id  -> runs `id`
+  const host = req.query.host || 'localhost';
+  exec('ping -c 1 ' + host, (err, stdout, stderr) => {
+    res.type('text/plain').send(stdout || stderr || String(err));
+  });
+});
 
-  if (url.pathname === '/user') {
-    // --- CRITICAL SAST FINDING #2: SQL injection (CWE-89) ---
-    // Untrusted query param concatenated straight into the SQL string.
-    // e.g. /user?name=alice' OR '1'='1   ->   dumps every row
-    const name = url.searchParams.get('name') || '';
-    const sql = "SELECT id, username, email FROM users WHERE username = '" + name + "'";
-    try {
-      const rows = db.prepare(sql).all();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(rows, null, 2));
-    } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'text/plain' });
-      res.end('query error: ' + e.message);
-    }
-    return;
-  }
+app.get('/user', (req, res) => {
+  // --- CRITICAL SAST: SQL injection (CWE-89) ---
+  // Express query param (taint source) concatenated into the SQL string
+  // passed to mysql2 .query() (recognized SQLI sink).
+  // e.g. /user?name=alice' OR '1'='1  -> returns every row
+  const name = req.query.name || '';
+  const sql = "SELECT id, username, email FROM users WHERE username = '" + name + "'";
+  db.query(sql, (err, rows) => {
+    if (err) return res.status(400).type('text/plain').send('query error: ' + err.message);
+    res.json(rows);
+  });
+});
 
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('vuln-demo: try GET /ping?host=localhost  or  GET /user?name=alice\n');
+app.get('/', (req, res) => {
+  res.type('text/plain').send('vuln-demo: try GET /ping?host=localhost  or  GET /user?name=alice\n');
 });
 
 const argv = parseArgs(process.argv.slice(2));
 const port = argv.port || 3000;
-
-server.listen(port, () => {
-  console.log(`vuln-demo listening on http://localhost:${port}`);
-});
+app.listen(port, () => console.log(`vuln-demo listening on http://localhost:${port}`));
